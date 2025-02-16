@@ -1056,9 +1056,9 @@ export class PostDefendAbilitySwapAbAttr extends PostDefendAbAttr {
     if (move.checkFlag(MoveFlags.MAKES_CONTACT, attacker, pokemon)
       && !attacker.getAbility().hasAttr(UnswappableAbilityAbAttr) && !move.hitsSubstitute(attacker, pokemon)) {
       if (!simulated) {
-        const tempAbilityId = attacker.getAbility().id;
-        attacker.summonData.ability = pokemon.getAbility().id;
-        pokemon.summonData.ability = tempAbilityId;
+        const tempAbility = attacker.getAbility();
+        attacker.setTempAbility(pokemon.getAbility());
+        pokemon.setTempAbility(tempAbility);
       }
       return true;
     }
@@ -1083,7 +1083,7 @@ export class PostDefendAbilityGiveAbAttr extends PostDefendAbAttr {
     if (move.checkFlag(MoveFlags.MAKES_CONTACT, attacker, pokemon) && !attacker.getAbility().hasAttr(UnsuppressableAbilityAbAttr)
       && !attacker.getAbility().hasAttr(PostDefendAbilityGiveAbAttr) && !move.hitsSubstitute(attacker, pokemon)) {
       if (!simulated) {
-        attacker.summonData.ability = this.ability;
+        attacker.setTempAbility(allAbilities[this.ability]);
       }
 
       return true;
@@ -1920,8 +1920,8 @@ export class CopyFaintedAllyAbilityAbAttr extends PostKnockOutAbAttr {
   applyPostKnockOut(pokemon: Pokemon, passive: boolean, simulated: boolean, knockedOut: Pokemon, args: any[]): boolean | Promise<boolean> {
     if (pokemon.isPlayer() === knockedOut.isPlayer() && !knockedOut.getAbility().hasAttr(UncopiableAbilityAbAttr)) {
       if (!simulated) {
-        pokemon.summonData.ability = knockedOut.getAbility().id;
         globalScene.queueMessage(i18next.t("abilityTriggers:copyFaintedAllyAbility", { pokemonNameWithAffix: getPokemonNameWithAffix(knockedOut), abilityName: allAbilities[knockedOut.getAbility().id].name }));
+        pokemon.setTempAbility(knockedOut.getAbility());
       }
       return true;
     }
@@ -2342,7 +2342,7 @@ export class PostSummonCopyAbilityAbAttr extends PostSummonAbAttr {
     if (!simulated) {
       this.target = target!;
       this.targetAbilityName = allAbilities[target!.getAbility().id].name;
-      pokemon.summonData.ability = target!.getAbility().id;
+      pokemon.setTempAbility(target!.getAbility());
       setAbilityRevealed(target!);
       pokemon.updateInfo();
     }
@@ -2474,7 +2474,6 @@ export class PostSummonTransformAbAttr extends PostSummonAbAttr {
     }
 
     pokemon.summonData.speciesForm = target.getSpeciesForm();
-    pokemon.summonData.ability = target.getAbility().id;
     pokemon.summonData.gender = target.getGender();
 
     // Copy all stats (except HP)
@@ -2504,6 +2503,8 @@ export class PostSummonTransformAbAttr extends PostSummonAbAttr {
     promises.push(pokemon.loadAssets(false).then(() => {
       pokemon.playAnim();
       pokemon.updateInfo();
+      // If the new ability activates immediately, it needs to happen after all the transform animations
+      pokemon.setTempAbility(target.getAbility());
     }));
 
     await Promise.all(promises);
@@ -4521,6 +4522,15 @@ export class NoFusionAbilityAbAttr extends AbAttr {
   }
 }
 
+/**
+ * Attach to a post-summon ability if it shouldn't be activated when it is obtained or activated during the battle
+ */
+export class NoOnGainActivationAttr extends AbAttr {
+  constructor() {
+    super(false);
+  }
+}
+
 export class IgnoreTypeImmunityAbAttr extends AbAttr {
   private defenderType: Type;
   private allowedMoveTypes: Type[];
@@ -4864,9 +4874,11 @@ async function applyAbAttrsInternal<TAttr extends AbAttr>(
   showAbilityInstant: boolean = false,
   simulated: boolean = false,
   messages: string[] = [],
+  gainedMidTurn: boolean = false /** Ignore passives and abilities with {@linkcode NoOnGainActivationAttr} */
 ) {
   for (const passive of [ false, true ]) {
-    if (!pokemon?.canApplyAbility(passive) || (passive && pokemon.getPassiveAbility().id === pokemon.getAbility().id)) {
+    if (!pokemon?.canApplyAbility(passive) || (passive && (pokemon.getPassiveAbility().id === pokemon.getAbility().id || gainedMidTurn))
+        || (gainedMidTurn && pokemon.getAbility().hasAttr(NoOnGainActivationAttr))) {
       continue;
     }
 
@@ -5297,6 +5309,21 @@ export function applyPostItemLostAbAttrs(attrType: Constructor<PostItemLostAbAtt
   return applyAbAttrsInternal<PostItemLostAbAttr>(attrType, pokemon, (attr, passive) => attr.applyPostItemLost(pokemon, simulated, args), args);
 }
 
+/**
+ * Applies abilities when they become active mid-turn (ability switch)
+ *
+ * Ignores passives as they don't change and shouldn't be reapplied when main abilities change
+ */
+export function applyOnGainAbAttrs(pokemon: Pokemon, simulated: boolean = false, ...args: any[]): Promise<void> {
+  return applyAbAttrsInternal<PostSummonAbAttr>(PostSummonAbAttr, pokemon, (attr, passive) => attr.applyPostSummon(pokemon, passive, simulated, args), args, false, simulated, [], true);
+}
+
+/**
+ * Clears primal weather during the turn if {@linkcode pokemon}'s ability corresponds to one
+ */
+export function applyOnGainClearWeatherAbAttrs(pokemon: Pokemon, simulated: boolean = false, ...args: any[]): Promise<void> {
+  return applyAbAttrsInternal<PreLeaveFieldClearWeatherAbAttr>(PreLeaveFieldClearWeatherAbAttr, pokemon, (attr, passive) => attr.applyPreLeaveField(pokemon, passive, simulated, [ ...args, true ]), args, true, simulated, [], true);
+}
 function queueShowAbility(pokemon: Pokemon, passive: boolean): void {
   globalScene.unshiftPhase(new ShowAbilityPhase(pokemon.id, passive));
   globalScene.clearPhaseQueueSplice();
